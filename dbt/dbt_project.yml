@@ -19,9 +19,3 @@ models:
     staging:
       +schema: public
       +materialized: table
-    migrations:
-      +schema: public
-      +materialized: table
-    inject:
-      +schema: public
-      +materialized: table

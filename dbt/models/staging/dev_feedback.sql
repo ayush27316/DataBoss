@@ -11,5 +11,5 @@ SELECT
   NULLIF(raw_payload->>'comment', '') AS comment,
   NULLIF(raw_payload->>'feedback', '') AS feedback
 FROM public.staging_raw 
-WHERE status IN ('pending', 'processing')
+WHERE status IN ('pending', 'processing', 'accepted')
   AND raw_payload ? ANY(ARRAY['rating', 'score', 'comment', 'feedback'])

@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS staging_raw (
     gcs_bucket  TEXT NOT NULL,
     gcs_object  TEXT NOT NULL,
     received_at TIMESTAMPTZ DEFAULT now(),
-    status      TEXT NOT NULL DEFAULT 'pending',  -- pending | accepted | rejected
+    status      TEXT NOT NULL DEFAULT 'pending',  -- pending | processing | accepted | rejected
     raw_payload JSONB
 );
 """
@@ -65,41 +65,41 @@ def ensure_staging_table():
 def swap_dev_to_prod():
     """
     Promote all DEV_ tables to PROD_ atomically.
-    Returns a list of table names that were swapped (without prefix).
+    Drops ALL existing PROD_ tables first (the DEV_ schema is the full replacement),
+    then renames DEV_ → PROD_.  Also cleans up migration/injection log tables.
+    Returns a list of table names that were promoted (without prefix).
     """
     engine = get_engine()
     with engine.begin() as conn:
-        rows = conn.execute(text("""
+        dev_rows = conn.execute(text("""
             SELECT tablename FROM pg_tables
             WHERE schemaname = 'public' AND tablename LIKE 'dev\\_%' ESCAPE '\\'
         """)).fetchall()
 
-        dev_tables = [r.tablename for r in rows]
+        dev_tables = [r.tablename for r in dev_rows]
         if not dev_tables:
             return []
 
         base_names = [t[len("dev_"):] for t in dev_tables]
 
-        for base in base_names:
-            prod = f"prod_{base}"
-            dev  = f"dev_{base}"
-            old  = f"_old_{base}"
-
-            exists = conn.execute(text(
-                "SELECT 1 FROM pg_tables WHERE schemaname='public' AND tablename=:t"
-            ), {"t": prod}).fetchone()
-            if exists:
-                conn.execute(text(f'ALTER TABLE "{prod}" RENAME TO "{old}"'))
-
-            conn.execute(text(f'ALTER TABLE "{dev}" RENAME TO "{prod}"'))
+        prod_rows = conn.execute(text("""
+            SELECT tablename FROM pg_tables
+            WHERE schemaname = 'public' AND tablename LIKE 'prod\\_%' ESCAPE '\\'
+        """)).fetchall()
+        for r in prod_rows:
+            conn.execute(text(f'DROP TABLE "{r.tablename}" CASCADE'))
 
         for base in base_names:
-            old = f"_old_{base}"
-            exists = conn.execute(text(
-                "SELECT 1 FROM pg_tables WHERE schemaname='public' AND tablename=:t"
-            ), {"t": old}).fetchone()
-            if exists:
-                conn.execute(text(f'DROP TABLE "{old}" CASCADE'))
+            conn.execute(text(f'ALTER TABLE "dev_{base}" RENAME TO "prod_{base}"'))
+
+        log_rows = conn.execute(text("""
+            SELECT tablename FROM pg_tables
+            WHERE schemaname = 'public'
+              AND (tablename LIKE '\\_migrate\\_%' ESCAPE '\\'
+                OR tablename LIKE '\\_inject\\_%' ESCAPE '\\')
+        """)).fetchall()
+        for r in log_rows:
+            conn.execute(text(f'DROP TABLE "{r.tablename}" CASCADE'))
 
     return base_names
 

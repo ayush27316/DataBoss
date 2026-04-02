@@ -9,8 +9,8 @@ SELECT
   NULLIF(raw_payload->>'company', '') AS company,
   NULLIF(raw_payload->>'signed_up', '') AS signup_date,
   NULLIF((raw_payload->>'age')::int::text, '')::int AS age,
-  raw_payload->'tags',
+  raw_payload->'tags' AS tags,
   NULLIF(raw_payload->>'referral_code', '') AS referral_code
 FROM public.staging_raw 
-WHERE status IN ('pending', 'processing')
+WHERE status IN ('pending', 'processing', 'accepted')
   AND (raw_payload ? 'email' OR raw_payload ? 'email_address')

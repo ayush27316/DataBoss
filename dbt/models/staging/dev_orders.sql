@@ -9,7 +9,7 @@ SELECT
   NULLIF((raw_payload->>'price_cents')::int::text, '')::int AS price_cents,
   NULLIF((raw_payload->>'quantity')::int::text, '')::int AS quantity,
   NULLIF(raw_payload->>'item', '') AS item,
-  raw_payload->'items'
+  raw_payload->'items' AS items
 FROM public.staging_raw 
-WHERE status IN ('pending', 'processing')
+WHERE status IN ('pending', 'processing', 'accepted')
   AND raw_payload ? ANY(ARRAY['customer_email', 'ordered_at', 'order_date'])
