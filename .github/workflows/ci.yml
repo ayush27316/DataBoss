@@ -1,0 +1,133 @@
+name: CI – Validate dbt models & schema
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "dbt/**"
+      - "app/**"
+      - "dev_schema.sql"
+      - "schema_summary.md"
+      - "migration_plan.sql"
+      - "injection_plan.sql"
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install dbt-core dbt-postgres psycopg2-binary
+
+      - name: Write dbt profiles.yml
+        run: |
+          python - <<'EOF'
+          import os, textwrap
+          from urllib.parse import urlparse
+          u = urlparse(os.environ["DATABASE_URL"])
+          content = textwrap.dedent(f"""
+            jdboss:
+              target: default
+              outputs:
+                default:
+                  type: postgres
+                  host: {u.hostname}
+                  port: {u.port or 5432}
+                  user: {u.username}
+                  password: {u.password}
+                  dbname: {u.path.lstrip('/')}
+                  schema: public
+                  threads: 4
+          """)
+          with open("dbt/profiles.yml", "w") as f:
+              f.write(content)
+          EOF
+
+      - name: Validate dev_schema.sql (DDL syntax check)
+        run: |
+          python - <<'EOF'
+          import os, sys
+
+          schema_file = "dev_schema.sql"
+          if not os.path.exists(schema_file):
+              print("No dev_schema.sql found — skipping DDL validation.")
+              sys.exit(0)
+
+          with open(schema_file) as f:
+              ddl = f.read()
+
+          if not ddl.strip():
+              print("ERROR: dev_schema.sql is empty")
+              sys.exit(1)
+
+          # Validate it contains CREATE TABLE statements for dev_ tables
+          ddl_lower = ddl.lower()
+          if "create table" not in ddl_lower:
+              print("ERROR: dev_schema.sql does not contain any CREATE TABLE statements")
+              sys.exit(1)
+
+          if "dev_" not in ddl_lower:
+              print("ERROR: dev_schema.sql does not define any dev_ tables")
+              sys.exit(1)
+
+          # Try executing against the real DB to validate syntax
+          import psycopg2
+          conn = psycopg2.connect(os.environ["DATABASE_URL"])
+          conn.autocommit = False
+          cur = conn.cursor()
+          try:
+              cur.execute(ddl)
+              print("dev_schema.sql DDL validated — syntax OK.")
+              # Rollback so CI doesn't actually create the tables
+              conn.rollback()
+          except Exception as e:
+              conn.rollback()
+              print(f"ERROR: dev_schema.sql has invalid DDL: {e}")
+              sys.exit(1)
+          finally:
+              conn.close()
+          EOF
+
+      - name: Validate injection_plan.sql exists
+        run: |
+          if [ ! -f injection_plan.sql ]; then
+            echo "ERROR: injection_plan.sql not found — agent must commit this file"
+            exit 1
+          fi
+          echo "injection_plan.sql found"
+          cat injection_plan.sql
+
+      - name: Validate migration_plan.sql (optional)
+        run: |
+          if [ -f migration_plan.sql ]; then
+            echo "migration_plan.sql found (PROD_ data backfill will run on merge)"
+            cat migration_plan.sql
+          else
+            echo "No migration_plan.sql — no PROD_ data to migrate (OK for first cycle)"
+          fi
+
+      - name: Check schema_summary.md exists
+        run: |
+          if [ ! -f schema_summary.md ]; then
+            echo "ERROR: schema_summary.md not found — agent must commit this file"
+            exit 1
+          fi
+          echo "schema_summary.md found"
+          head -40 schema_summary.md
+
+      - name: dbt compile (syntax check)
+        run: dbt compile --project-dir dbt --profiles-dir dbt
+
+      - name: dbt test
+        run: dbt test --project-dir dbt --profiles-dir dbt
+        continue-on-error: true

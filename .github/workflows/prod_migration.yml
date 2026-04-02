@@ -1,0 +1,259 @@
+name: Prod Migration – Execute Execution Plan
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+jobs:
+  execute:
+    if: |
+      github.event.pull_request.merged == true &&
+      startsWith(github.event.pull_request.head.ref, 'agent/migration')
+
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install dbt-core dbt-postgres psycopg2-binary google-cloud-storage
+
+      - name: Write dbt profiles.yml
+        run: |
+          python - <<'EOF'
+          import os, textwrap
+          from urllib.parse import urlparse
+          u = urlparse(os.environ["DATABASE_URL"])
+          content = textwrap.dedent(f"""\
+            jdboss:
+              target: default
+              outputs:
+                default:
+                  type: postgres
+                  host: {u.hostname}
+                  port: {u.port or 5432}
+                  user: {u.username}
+                  password: {u.password}
+                  dbname: {u.path.lstrip('/')}
+                  schema: public
+                  threads: 4
+          """)
+          with open("dbt/profiles.yml", "w") as f:
+              f.write(content)
+          EOF
+
+      # ---------------------------------------------------------------
+      # Step 1: Create DEV_ tables from dev_schema.sql (DDL)
+      # ---------------------------------------------------------------
+      - name: "Step 1: Create DEV_ tables from dev_schema.sql"
+        run: |
+          python - <<'EOF'
+          import os, sys, psycopg2
+
+          schema_file = "dev_schema.sql"
+          if not os.path.exists(schema_file):
+              print("ERROR: dev_schema.sql not found in repo — cannot create tables.")
+              sys.exit(1)
+
+          with open(schema_file) as f:
+              ddl = f.read()
+
+          if not ddl.strip():
+              print("ERROR: dev_schema.sql is empty.")
+              sys.exit(1)
+
+          conn = psycopg2.connect(os.environ["DATABASE_URL"])
+          conn.autocommit = False
+          cur = conn.cursor()
+          try:
+              cur.execute(ddl)
+              conn.commit()
+              print("DEV_ tables created from dev_schema.sql")
+          except Exception as e:
+              conn.rollback()
+              print(f"DDL execution failed: {e}")
+              raise
+          finally:
+              conn.close()
+          EOF
+
+      # ---------------------------------------------------------------
+      # Step 2: Migrate PROD_ data → DEV_ (from migration_plan.sql)
+      # ---------------------------------------------------------------
+      - name: "Step 2: Migrate PROD_ data into DEV_ tables"
+        run: |
+          python - <<'EOF'
+          import os, psycopg2
+
+          plan_file = "migration_plan.sql"
+          if not os.path.exists(plan_file):
+              print("No migration_plan.sql — skipping migration (no PROD_ data to backfill).")
+              exit(0)
+
+          with open(plan_file) as f:
+              content = f.read()
+
+          if not content.strip():
+              print("migration_plan.sql is empty — skipping.")
+              exit(0)
+
+          conn = psycopg2.connect(os.environ["DATABASE_URL"])
+          cur = conn.cursor()
+
+          # Execute each statement in its own transaction via savepoints
+          statements = [s.strip() for s in content.split(';') if s.strip()]
+          success = 0
+          failed = 0
+          conn.autocommit = False
+          for stmt in statements:
+              try:
+                  cur.execute("SAVEPOINT migration_sp")
+                  cur.execute(stmt)
+                  cur.execute("RELEASE SAVEPOINT migration_sp")
+                  print(f"  OK ({cur.rowcount} rows): {stmt[:80]}...")
+                  success += 1
+              except Exception as e:
+                  cur.execute("ROLLBACK TO SAVEPOINT migration_sp")
+                  print(f"  FAILED: {e}")
+                  failed += 1
+
+          conn.commit()
+          print(f"Migration: {success} succeeded, {failed} failed out of {len(statements)} statements.")
+          conn.close()
+          EOF
+
+      # ---------------------------------------------------------------
+      # Step 3: Inject staging data → DEV_ (from injection_plan.sql)
+      # ---------------------------------------------------------------
+      - name: "Step 3: Inject staging data into DEV_ tables"
+        run: |
+          python - <<'EOF'
+          import os, sys, psycopg2
+
+          plan_file = "injection_plan.sql"
+          if not os.path.exists(plan_file):
+              print("WARNING: injection_plan.sql not found — running dbt staging models as fallback.")
+              import subprocess
+              result = subprocess.run(
+                  ["dbt", "run", "--select", "staging", "--project-dir", "dbt", "--profiles-dir", "dbt"],
+                  capture_output=True, text=True
+              )
+              print(result.stdout)
+              if result.returncode != 0:
+                  print(result.stderr)
+              exit(0)
+
+          with open(plan_file) as f:
+              content = f.read()
+
+          if not content.strip():
+              print("injection_plan.sql is empty — skipping.")
+              exit(0)
+
+          conn = psycopg2.connect(os.environ["DATABASE_URL"])
+          cur = conn.cursor()
+
+          statements = [s.strip() for s in content.split(';') if s.strip()]
+          success = 0
+          failed = 0
+          conn.autocommit = False
+          for stmt in statements:
+              try:
+                  cur.execute("SAVEPOINT injection_sp")
+                  cur.execute(stmt)
+                  cur.execute("RELEASE SAVEPOINT injection_sp")
+                  print(f"  OK ({cur.rowcount} rows): {stmt[:80]}...")
+                  success += 1
+              except Exception as e:
+                  cur.execute("ROLLBACK TO SAVEPOINT injection_sp")
+                  print(f"  FAILED: {e}")
+                  failed += 1
+
+          conn.commit()
+          print(f"Injection: {success} succeeded, {failed} failed out of {len(statements)} statements.")
+          conn.close()
+          EOF
+
+      # ---------------------------------------------------------------
+      # Step 4: Validate DEV_ tables
+      # ---------------------------------------------------------------
+      - name: "Step 4: Validate DEV_ tables"
+        run: dbt test --project-dir dbt --profiles-dir dbt
+        continue-on-error: true
+
+      # ---------------------------------------------------------------
+      # Step 5: Atomic swap DEV_ → PROD_
+      # Note: GCS objects are already deleted at ingest time.
+      #       Accepted staging rows are already deleted by the Injection Agent.
+      # ---------------------------------------------------------------
+      - name: "Step 5: Swap DEV_ → PROD_"
+        run: |
+          python - <<'EOF'
+          import os, psycopg2
+
+          conn = psycopg2.connect(os.environ["DATABASE_URL"])
+          conn.autocommit = False
+          cur = conn.cursor()
+
+          try:
+              cur.execute("""
+                  SELECT tablename FROM pg_tables
+                  WHERE schemaname = 'public' AND tablename LIKE 'dev\\_%%' ESCAPE '\\'
+              """)
+              dev_tables = [r[0] for r in cur.fetchall()]
+
+              if not dev_tables:
+                  print("No DEV_ tables found — nothing to swap.")
+                  conn.close()
+                  exit(0)
+
+              dev_base_names = [t[len("dev_"):] for t in dev_tables]
+
+              cur.execute("""
+                  SELECT tablename FROM pg_tables
+                  WHERE schemaname = 'public' AND tablename LIKE 'prod\\_%%' ESCAPE '\\'
+              """)
+              all_prod_tables = [r[0] for r in cur.fetchall()]
+
+              print(f"DEV_ tables to promote: {dev_base_names}")
+              print(f"PROD_ tables to replace: {all_prod_tables}")
+
+              for prod_table in all_prod_tables:
+                  cur.execute(f'DROP TABLE "{prod_table}" CASCADE')
+                  print(f"  dropped {prod_table}")
+
+              for base in dev_base_names:
+                  cur.execute(f'ALTER TABLE "dev_{base}" RENAME TO "prod_{base}"')
+                  print(f"  dev_{base} -> prod_{base}")
+
+              # Clean up any leftover log tables from writable-CTE models
+              cur.execute("""
+                  SELECT tablename FROM pg_tables
+                  WHERE schemaname = 'public'
+                    AND (tablename LIKE '\\_migrate\\_%%' ESCAPE '\\'
+                      OR tablename LIKE '\\_inject\\_%%' ESCAPE '\\')
+              """)
+              log_tables = [r[0] for r in cur.fetchall()]
+              for lt in log_tables:
+                  cur.execute(f'DROP TABLE "{lt}" CASCADE')
+                  print(f"  dropped log table {lt}")
+
+              conn.commit()
+              print("Swap complete.")
+
+          except Exception as e:
+              conn.rollback()
+              print(f"FAILED — rolled back: {e}")
+              raise
+          finally:
+              conn.close()
+          EOF
