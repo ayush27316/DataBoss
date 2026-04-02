@@ -1,0 +1,21 @@
+# Secrets — never commit these
+.env
+.env.local
+credentials.json
+dbt/profiles.yml
+
+# Python
+__pycache__/
+*.pyc
+env/
+.venv/
+*.egg-info/
+
+# dbt artifacts
+dbt/target/
+dbt/dbt_packages/
+dbt/logs/
+
+# Logs
+logs/
+*.log
