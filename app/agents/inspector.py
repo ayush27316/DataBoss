@@ -505,7 +505,8 @@ def run_inspector(cycle_id: str) -> str:
         temperature=0,
     )
 
-    github_tools = get_github_toolkit().get_tools()
+    branch_name = f"agent/migration-{cycle_id}"
+    github_tools = get_github_toolkit(branch=branch_name).get_tools()
     custom_tools = [
         write_dbt_staging_model, read_dbt_staging_model, list_dbt_staging_models,
         get_current_schema, read_staging_data,
@@ -523,7 +524,7 @@ def run_inspector(cycle_id: str) -> str:
         agent=agent,
         tools=all_tools,
         verbose=False,
-        max_iterations=40,
+        max_iterations=80,
         handle_parsing_errors=True,
     )
 

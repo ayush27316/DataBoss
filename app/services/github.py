@@ -14,10 +14,14 @@ import os
 settings = get_settings()
 
 
-def get_github_toolkit() -> GitHubToolkit:
+def get_github_toolkit(branch: str | None = None) -> GitHubToolkit:
     """
     Returns a LangChain GitHubToolkit bound to the configured repo.
     The toolkit is passed directly to the LangChain agent as its tool list.
+
+    Args:
+        branch: Override the working branch (e.g. "agent/migration-abc123").
+                If not provided, uses the default from settings.
 
     Required env vars (set in Railway / .env):
       GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY, GITHUB_REPOSITORY,
@@ -26,7 +30,7 @@ def get_github_toolkit() -> GitHubToolkit:
     """
     os.environ.setdefault("GITHUB_REPOSITORY", settings.github_repository)
     os.environ.setdefault("GITHUB_BASE_BRANCH", settings.github_base_branch)
-    os.environ.setdefault("GITHUB_BRANCH", settings.github_branch)
+    os.environ["GITHUB_BRANCH"] = branch or settings.github_branch
 
     # Local-friendly auth: support either a GitHub App or a PAT.
     if settings.github_access_token:

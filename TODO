@@ -1,2 +1,4 @@
 Make sure stagin area and gcp bucket cleaning is hadnelded
 recharege xai api key
+
+gh secret set DATABASE_URL --repo ayush27316/DataBoss 
