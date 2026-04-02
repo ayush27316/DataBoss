@@ -106,8 +106,7 @@ def _run_pipeline() -> dict:
 
     injection_status = ""
     try:
-        injection_model = f"inject_{cycle_id}"
-        injection_status = run_injection(cycle_id=cycle_id, injection_model=injection_model)
+        injection_status = run_injection(cycle_id=cycle_id)
     except Exception:
         log.error("Injection failed [%s]:\n%s", cycle_id, traceback.format_exc())
 
