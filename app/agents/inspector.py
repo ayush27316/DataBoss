@@ -21,7 +21,11 @@ from app.database import Session
 from app.logging_config import get_logger
 from app.services.dev_schema_ddl import render_dev_schema_sql
 from app.services.dbt_runner import run_dbt, DBT_PROJECT_DIR
-from app.services.github import get_github_toolkit, push_dev_schema_artifact
+from app.services.github import (
+    get_github_toolkit,
+    push_dev_schema_artifact,
+    sync_local_dbt_models_to_github,
+)
 
 settings = get_settings()
 log = get_logger("inspector")
@@ -282,6 +286,8 @@ def run_inspector(cycle_id: str) -> str:
 
     result = executor.invoke({"cycle_id": cycle_id})
     output = result.get("output", "")
+    sync_msg = sync_local_dbt_models_to_github(cycle_id, ALLOWED_DIRS)
+    log.info("%s", sync_msg)
     ddl = render_dev_schema_sql(cycle_id)
     if not ddl.strip():
         ddl = f"-- dev_schema_{cycle_id}.sql — no public.dev_* tables at end of cycle.\n"
